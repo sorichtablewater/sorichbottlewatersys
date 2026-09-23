@@ -2382,6 +2382,35 @@ function printWeeklyStatement() {
     return;
   }
 
+  // OPTIONAL MATERIAL / PACKING-BAG DEDUCTION FOR PROFIT SHARING
+  // The normal weekly net remains unchanged unless the user chooses YES.
+  let materialPackingDeduction = 0;
+  weekRecords.forEach(d => {
+    (d.expenses || []).forEach(e => {
+      const amount = Number(e.amount) || 0;
+      const type = (e.type || '').toLowerCase().trim();
+      const desc = (e.desc || '').toLowerCase().trim();
+
+      if (
+        type.includes('material') ||
+        desc.includes('material') ||
+        type.includes('packing') ||
+        desc.includes('packing') ||
+        desc.includes('packing bag') ||
+        desc.includes('bag')
+      ) {
+        materialPackingDeduction += amount;
+      }
+    });
+  });
+
+  const deductMaterialPacking = confirm(
+    `Do you want to add Material / Packing Bag to be deducted from Net Profit?\n\n` +
+    `Material + Packing Bag total: ₦${materialPackingDeduction.toLocaleString(undefined, { minimumFractionDigits: 2 })}\n\n` +
+    `YES = deduct it from Net Profit for Total Sharing Profit\n` +
+    `NO = show the normal Net Profit`
+  );
+
   const copies = parseInt(document.getElementById('invoiceCopies').value) || 4;
   const manager = document.getElementById('managerName').value || 'Manager';
   const footer = document.getElementById('invoiceFooter').value || 'Drink It. Love It.';
@@ -2434,6 +2463,15 @@ function printWeeklyStatement() {
   const avgUnitPrice = totalQty
     ? (totalSales / totalQty).toFixed(2)
     : "0.00";
+
+  const normalNetProfit = totalNet;
+  const totalSharingProfit = deductMaterialPacking
+    ? normalNetProfit - materialPackingDeduction
+    : normalNetProfit;
+
+  const sharingProfitLabel = deductMaterialPacking
+    ? 'Total Sharing Profit'
+    : 'Normal Net Profit';
 
   const win = window.open('', '', 'width=1100,height=900');
 
@@ -2563,8 +2601,23 @@ function printWeeklyStatement() {
       <p><strong>Total Expenses:</strong>
       ₦${totalExpenses.toLocaleString(undefined,{minimumFractionDigits:2})}</p>
 
-      <p><strong>Net Balance:</strong>
-      ₦${totalNet.toLocaleString(undefined,{minimumFractionDigits:2})}</p>
+      <p><strong>Normal Net Profit:</strong>
+      ₦${normalNetProfit.toLocaleString(undefined,{minimumFractionDigits:2})}</p>
+
+      ${deductMaterialPacking ? `
+      <p><strong>Material / Packing Bag Deduction:</strong>
+      -₦${materialPackingDeduction.toLocaleString(undefined,{minimumFractionDigits:2})}</p>
+
+      <p style="font-size:18px; font-weight:bold;">
+        <strong>Total Sharing Profit:</strong>
+        ₦${totalSharingProfit.toLocaleString(undefined,{minimumFractionDigits:2})}
+      </p>
+      ` : `
+      <p style="font-size:18px; font-weight:bold;">
+        <strong>Normal Net Profit:</strong>
+        ₦${totalSharingProfit.toLocaleString(undefined,{minimumFractionDigits:2})}
+      </p>
+      `}
 
       <p><strong>Total Quantity Sold:</strong>
       ${totalQty}</p>
