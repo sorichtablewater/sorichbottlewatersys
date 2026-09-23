@@ -1765,821 +1765,253 @@ let loginCredentials = JSON.parse(localStorage.getItem('loginCredentials')) || {
 
 
 // ====== MONTHLY STATEMENT FUNCTION ======
-// ====== STATEMENT HELPERS ======
-function moneyN(n) {
-  return `₦${(Number(n) || 0).toLocaleString('en-NG', {
-    minimumFractionDigits: 2,
-    maximumFractionDigits: 2
-  })}`;
+/* =========================================================
+   ADVANCED STATEMENT PRINTING
+   - Expenses come from each Daily Record's expenses array.
+   - Bagger/Packing Bag is MONEY SPENT on bag-related expenses,
+     never quantity of water bags sold.
+   - Weekly report has Top 5 customers and material adjustment.
+   ========================================================= */
+
+function money(v){
+  return Number(v || 0).toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2});
 }
 
-function escapeReportText(value) {
-  return String(value ?? '')
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&#039;');
+function esc(v){
+  return String(v ?? '').replace(/[&<>"']/g, m => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));
 }
 
-/*
-  Bagger / Packing Bag money comes ONLY from expenses archived inside
-  the Daily Records for the selected period. It is NOT sales quantity.
-  We intentionally look for bag-related expense wording in Type/Description.
-*/
-function isBaggerPackingExpense(e) {
-  const type = String(e?.type || '').toLowerCase().trim();
-  const desc = String(e?.desc || '').toLowerCase().trim();
-  const text = `${type} ${desc}`;
-
-  return (
-    text.includes('bagger') ||
-    text.includes('packing bag') ||
-    text.includes('packaging bag') ||
-    text.includes('pack bag') ||
-    text.includes('packingbag') ||
-    text.includes('packagingbag') ||
-    text.includes('polythene bag') ||
-    text.includes('nylon bag') ||
-    text.includes('bag ')
-  );
+function isBagExpense(e){
+  const text=((e.type||'')+' '+(e.desc||'')).toLowerCase();
+  return text.includes('bagger') || text.includes('packing bag') || text.includes('packaging bag') || text.includes('packingbag') || text.includes('bagging bag');
 }
 
-function collectBaggerPackingExpenses(records) {
-  const rows = [];
-  let total = 0;
+function isOperatorExpense(e){
+  const text=((e.type||'')+' '+(e.desc||'')).toLowerCase();
+  return text.includes('operator') || text.includes('operation payment') || text.includes('operator payment');
+}
 
-  (records || []).forEach(d => {
-    (d.expenses || []).forEach(e => {
-      if (isBaggerPackingExpense(e)) {
-        const amount = Number(e.amount) || 0;
-        total += amount;
-        rows.push({
-          date: d.date,
-          type: e.type || 'Expense',
-          desc: e.desc || 'Bagger / Packing Bag',
-          paidTo: e.paidTo || '',
-          amount
-        });
+function collectPeriodData(records){
+  const out={
+    totalSales:0,totalExpenses:0,totalQty:0,unitSum:0,unitCount:0,
+    baggerTotal:0,operatorTotal:0,materialTotal:0,
+    expenseRows:[],baggerRows:[],operatorRows:[],
+    customerSales:{},customerQty:{},customerDebt:{}
+  };
+
+  records.forEach(d=>{
+    out.totalSales += Number(d.totalSales)||0;
+    (d.sales||[]).forEach(s=>{
+      const qty=Number(s.qty)||0, total=Number(s.total)||0;
+      out.totalQty += qty;
+      if(Number.isFinite(Number(s.unit))){ out.unitSum += Number(s.unit)||0; out.unitCount++; }
+      else if(qty){ out.unitSum += total/qty; out.unitCount++; }
+      const customer=String(s.customer||'Unknown').trim() || 'Unknown';
+      const key=customer.toLowerCase();
+      out.customerSales[key] ||= {name:customer,sales:0,qty:0};
+      out.customerSales[key].sales += total;
+      out.customerSales[key].qty += qty;
+      const owing=Number(s.owing)||0;
+      if(owing>0){
+        out.customerDebt[key] ||= {name:customer,balance:0,owed:0,paid:0,lastDate:d.date};
+        out.customerDebt[key].balance += owing;
+        out.customerDebt[key].owed += total;
+        out.customerDebt[key].paid += Number(s.paid)||0;
+        if(d.date > out.customerDebt[key].lastDate) out.customerDebt[key].lastDate=d.date;
       }
+    });
+
+    // IMPORTANT: weekly/monthly expense totals are rebuilt from the actual
+    // expenses stored inside the selected Daily Records.
+    (d.expenses||[]).forEach(e=>{
+      const amount=Number(e.amount)||0;
+      out.totalExpenses += amount;
+      const row={date:d.date,type:e.type||'-',desc:e.desc||'-',paidTo:e.paidTo||'-',amount};
+      out.expenseRows.push(row);
+      if(isBagExpense(e)){
+        out.baggerTotal += amount;
+        out.baggerRows.push(row);
+      }
+      if(isOperatorExpense(e)){
+        out.operatorTotal += amount;
+        out.operatorRows.push(row);
+      }
+      const txt=((e.type||'')+' '+(e.desc||'')).toLowerCase();
+      if(txt.includes('material')) out.materialTotal += amount;
     });
   });
 
-  return { rows, total };
+  out.normalNet=out.totalSales-out.totalExpenses;
+  out.avgUnitPrice=out.totalQty ? out.totalSales/out.totalQty : 0;
+  out.top5=Object.values(out.customerSales).sort((a,b)=>b.sales-a.sales).slice(0,5);
+  return out;
 }
 
-function reportStyles() {
-  return `
-    <style>
-      @page { size: A4; margin: 12mm; }
-
-      * { box-sizing: border-box; }
-
-      body {
-        margin: 0;
-        padding: 0;
-        font-family: Arial, Helvetica, sans-serif;
-        color: #17324d;
-        background: linear-gradient(180deg, #dff6ff 0%, #ffffff 45%, #eef9ff 100%);
-        -webkit-print-color-adjust: exact !important;
-        print-color-adjust: exact !important;
-      }
-
-      .report {
-        width: 100%;
-        max-width: 980px;
-        margin: 0 auto;
-        padding: 18px;
-      }
-
-      .brand {
-        background: linear-gradient(135deg, #0066cc, #00a8e8, #55d6ff);
-        color: white;
-        border-radius: 18px;
-        padding: 20px;
-        text-align: center;
-        box-shadow: 0 6px 18px rgba(0,102,204,.20);
-      }
-
-      .brand h1 {
-        margin: 0 0 5px;
-        font-size: 27px;
-        letter-spacing: 1px;
-      }
-
-      .brand p { margin: 4px 0; }
-
-      .report-title {
-        margin: 15px 0 4px;
-        color: #0066cc;
-        font-size: 22px;
-        text-align: center;
-      }
-
-      .period {
-        text-align: center;
-        color: #49677f;
-        margin-bottom: 15px;
-      }
-
-      .cards {
-        display: grid;
-        grid-template-columns: repeat(4, 1fr);
-        gap: 10px;
-        margin: 12px 0 18px;
-      }
-
-      .card {
-        background: white;
-        border: 2px solid #bdeaff;
-        border-radius: 13px;
-        padding: 12px;
-        text-align: center;
-        box-shadow: 0 3px 10px rgba(0,102,204,.10);
-      }
-
-      .card .label {
-        display: block;
-        color: #47708f;
-        font-size: 11px;
-        font-weight: bold;
-        text-transform: uppercase;
-      }
-
-      .card .value {
-        display: block;
-        margin-top: 6px;
-        color: #0066cc;
-        font-size: 18px;
-        font-weight: bold;
-      }
-
-      .section {
-        margin-top: 18px;
-        page-break-inside: avoid;
-      }
-
-      .section h2 {
-        margin: 0 0 8px;
-        padding: 9px 12px;
-        color: white;
-        background: linear-gradient(90deg, #0066cc, #16b9e8);
-        border-radius: 9px;
-        font-size: 16px;
-      }
-
-      table {
-        width: 100%;
-        border-collapse: collapse;
-        background: white;
-        margin-bottom: 8px;
-      }
-
-      th {
-        background: #cceeff !important;
-        color: #005ca8;
-        font-weight: bold;
-      }
-
-      th, td {
-        border: 1px solid #9edcf5;
-        padding: 7px 6px;
-        font-size: 11px;
-        vertical-align: top;
-      }
-
-      tr:nth-child(even) td {
-        background: #f3fbff;
-      }
-
-      .total-row td {
-        background: #d8f3ff !important;
-        color: #004e8f;
-        font-weight: bold;
-      }
-
-      .profit-box {
-        margin-top: 14px;
-        padding: 15px;
-        border-radius: 14px;
-        background: linear-gradient(135deg, #e8f9ff, #ffffff);
-        border: 2px solid #52c9ef;
-      }
-
-      .profit-line {
-        display: flex;
-        justify-content: space-between;
-        gap: 15px;
-        padding: 6px 0;
-        border-bottom: 1px dashed #9edcf5;
-      }
-
-      .profit-line:last-child { border-bottom: 0; }
-
-      .real-profit {
-        margin-top: 8px;
-        padding: 11px;
-        border-radius: 10px;
-        background: #0066cc;
-        color: white;
-        font-size: 17px;
-        font-weight: bold;
-      }
-
-      .note {
-        background: #fff8dc;
-        border-left: 5px solid #f2b600;
-        padding: 9px;
-        margin: 10px 0;
-        font-size: 11px;
-      }
-
-      .footer {
-        margin-top: 22px;
-        padding: 12px;
-        text-align: center;
-        color: #47708f;
-        border-top: 2px solid #bdeaff;
-      }
-
-      @media print {
-        body { background: white; }
-        .report { max-width: none; }
-      }
-
-      @media (max-width: 700px) {
-        .cards { grid-template-columns: repeat(2, 1fr); }
-      }
-    </style>
-  `;
+function statementCSS(){
+ return `
+ @page{size:A4;margin:12mm}
+ *{box-sizing:border-box}
+ body{font-family:Arial,Helvetica,sans-serif;margin:0;background:#fff;color:#083b66;font-weight:700}
+ .report{border:4px solid #0066cc;padding:18px;border-radius:16px;background:linear-gradient(180deg,#e7f7ff 0%,#ffffff 38%,#f4fbff 100%)}
+ .head{text-align:center;background:linear-gradient(135deg,#0066cc,#00a8e8);color:#fff;padding:18px;border-radius:12px;margin-bottom:14px}
+ .head h1{margin:0;font-size:25px}.head p{margin:4px 0;font-weight:700}
+ h2{color:#005cb9;margin:14px 0 8px;border-bottom:4px solid #0066cc;padding-bottom:5px;font-weight:900}
+ .period{background:#dff4ff;border:3px solid #00a8e8;padding:9px;border-radius:9px;text-align:center;font-size:14px}
+ .cards{display:grid;grid-template-columns:repeat(3,1fr);gap:9px;margin:12px 0}
+ .card{border:3px solid #0066cc;border-radius:10px;padding:11px;text-align:center;background:#fff}
+ .card .label{font-size:11px;color:#17618f}.card .value{font-size:17px;margin-top:4px;color:#004b93}
+ table{width:100%;border-collapse:collapse;margin:7px 0 15px;background:#fff}
+ th{background:#cceeff;color:#003d70;border:2px solid #0066cc;padding:7px;font-weight:900}
+ td{border:2px solid #0066cc;padding:6px;font-weight:700}
+ tr.total td{background:#dff4ff;font-weight:900;border-top:4px solid #0066cc}
+ .profit{display:grid;grid-template-columns:repeat(3,1fr);gap:9px;margin:12px 0}
+ .profit .box{padding:12px;border:4px solid #0066cc;border-radius:10px;background:#fff;text-align:center}
+ .profit .real{background:#0066cc;color:#fff}.profit .real .value{color:#fff}
+ .note{background:#fff4cc;border:3px solid #e0a800;padding:9px;border-radius:9px;margin:10px 0}
+ .footer{text-align:center;margin-top:18px;padding:12px;border-top:4px solid #0066cc;font-size:15px}
+ .small{font-size:11px}.pagebreak{page-break-before:always}
+ @media print{body{background:#fff}.report{box-shadow:none}h2{break-after:avoid}table{break-inside:auto}tr{break-inside:avoid}}
+ `;
 }
 
-function openReportWindow(title) {
-  const win = window.open('', 'SORICH_REPORT', 'width=1100,height=850');
-  if (!win) {
-    alert("Pop-up blocked! Allow pop-ups.");
-    return null;
-  }
-
-  win.document.open();
-  win.document.write(`
-    <!DOCTYPE html>
-    <html>
-    <head>
-      <meta charset="UTF-8">
-      <title>${escapeReportText(title)}</title>
-      ${reportStyles()}
-    </head>
-    <body>
-      <div class="report">
-  `);
-  return win;
+function writeReportHeader(win,title,copyName,period,manager){
+ win.document.write(`<div class="report">
+   <div class="head"><h1>SORICH TABLE WATER</h1><p>DRINK IT. LOVE IT.</p><p>SORICH CLASSY SERVICES</p><p class="small">PLOT 1 UGBSIS OFF UGBOGO, UDU ROAD, DELTA STATE</p><p class="small">08164084402 &nbsp; | &nbsp; 07012623006 &nbsp; | &nbsp; 08067338211</p></div>
+   <div class="period"><strong>${esc(title)}</strong><br>${esc(period)}<br>ISSUER: ${esc(manager)} &nbsp; | &nbsp; ${esc(copyName).toUpperCase()} COPY</div>`);
 }
 
-function closeAndPrintReport(win) {
-  win.document.write(`</div></body></html>`);
-  win.document.close();
-  win.focus();
-
-  // Give the browser a moment to apply the print CSS/backgrounds.
-  setTimeout(() => {
-    win.print();
-    win.close();
-  }, 350);
+function writeSummaryCards(win,data){
+ win.document.write(`<h2>WEEK / PERIOD SUMMARY</h2><div class="cards">
+ <div class="card"><div class="label">TOTAL SALES</div><div class="value">₦${money(data.totalSales)}</div></div>
+ <div class="card"><div class="label">TOTAL EXPENSES</div><div class="value">₦${money(data.totalExpenses)}</div></div>
+ <div class="card"><div class="label">NORMAL NET PROFIT</div><div class="value">₦${money(data.normalNet)}</div></div>
+ <div class="card"><div class="label">TOTAL QUANTITY SOLD</div><div class="value">${data.totalQty.toLocaleString()}</div></div>
+ <div class="card"><div class="label">AVERAGE UNIT PRICE</div><div class="value">₦${money(data.avgUnitPrice)}</div></div>
+ <div class="card"><div class="label">BAGGER / PACKING BAG SPEND</div><div class="value">₦${money(data.baggerTotal)}</div></div>
+ </div>`);
 }
 
-// ====== MONTHLY STATEMENT FUNCTION ======
-function printMonthlyStatement() {
-  if (!dailyData.length) {
-    alert("No daily records available.");
-    return;
-  }
+function writeExpenseSection(win,data){
+ win.document.write(`<h2>EXPENSES FOR THIS PERIOD</h2><table><tr><th>Date</th><th>Type</th><th>Description</th><th>Paid To</th><th>Amount</th></tr>`);
+ data.expenseRows.forEach(e=>win.document.write(`<tr><td>${esc(e.date)}</td><td>${esc(e.type)}</td><td>${esc(e.desc)}</td><td>${esc(e.paidTo)}</td><td>₦${money(e.amount)}</td></tr>`));
+ win.document.write(`<tr class="total"><td colspan="4">TOTAL PERIOD EXPENSES</td><td>₦${money(data.totalExpenses)}</td></tr></table>`);
 
-  let month = parseInt(prompt(
-    "Enter month number (1-12):",
-    new Date().getMonth() + 1
-  ), 10);
+ win.document.write(`<h2>BAGGER / PACKING BAG SPENDING</h2><table><tr><th>Date</th><th>Type</th><th>Description</th><th>Paid To</th><th>Amount</th></tr>`);
+ data.baggerRows.forEach(e=>win.document.write(`<tr><td>${esc(e.date)}</td><td>${esc(e.type)}</td><td>${esc(e.desc)}</td><td>${esc(e.paidTo)}</td><td>₦${money(e.amount)}</td></tr>`));
+ win.document.write(`<tr class="total"><td colspan="4">TOTAL BAGGER / PACKING BAG SPENDING</td><td>₦${money(data.baggerTotal)}</td></tr></table>`);
 
-  let year = parseInt(prompt(
-    "Enter year (YYYY):",
-    new Date().getFullYear()
-  ), 10);
-
-  if (!month || !year || month < 1 || month > 12) return;
-
-  const monthStr = String(month).padStart(2, '0');
-
-  const monthRecords = dailyData.filter(d => {
-    const [y, m] = String(d.date || '').split('-');
-    return parseInt(y, 10) === year && m === monthStr;
-  });
-
-  if (!monthRecords.length) {
-    alert("No records found for this month.");
-    return;
-  }
-
-  const copies = parseInt(document.getElementById('invoiceCopies')?.value, 10) || 4;
-  const manager = document.getElementById('managerName')?.value || 'Manager';
-  const footer = document.getElementById('invoiceFooter')?.value || 'Drink It. Love It.';
-
-  let totalSales = 0;
-  let totalExpenses = 0;
-  let totalQty = 0;
-
-  const customerSales = {};
-
-  monthRecords.forEach(d => {
-    totalSales += Number(d.totalSales) || 0;
-    totalExpenses += Number(d.totalExpenses) || 0;
-
-    (d.sales || []).forEach(s => {
-      totalQty += Number(s.qty) || 0;
-      const name = String(s.customer || 'Unknown Customer').trim() || 'Unknown Customer';
-      const key = name.toLowerCase();
-
-      if (!customerSales[key]) {
-        customerSales[key] = {
-          customer: name,
-          qty: 0,
-          sales: 0
-        };
-      }
-
-      customerSales[key].qty += Number(s.qty) || 0;
-      customerSales[key].sales += Number(s.total) || 0;
-    });
-  });
-
-  const monthlyNet = totalSales - totalExpenses;
-  const monthlyAvgUnitPrice = totalQty ? totalSales / totalQty : 0;
-
-  const bagger = collectBaggerPackingExpenses(monthRecords);
-
-  const baggerRows = bagger.rows.map(e => `
-    <tr>
-      <td>${escapeReportText(e.date)}</td>
-      <td>${escapeReportText(e.type)}</td>
-      <td>${escapeReportText(e.desc)}</td>
-      <td>${escapeReportText(e.paidTo)}</td>
-      <td>${moneyN(e.amount)}</td>
-    </tr>
-  `).join('');
-
-  const topCustomers = Object.values(customerSales)
-    .sort((a, b) => b.sales - a.sales)
-    .slice(0, 5);
-
-  const debtorRows = debtData
-    .filter(d => Number(d.owing) > 0)
-    .map(d => `
-      <tr>
-        <td>${escapeReportText(d.customer)}</td>
-        <td>${moneyN(Number(d.totalPaid || 0) + Number(d.owing || 0))}</td>
-        <td>${moneyN(d.totalPaid)}</td>
-        <td>${moneyN(d.owing)}</td>
-        <td>OWING</td>
-      </tr>
-    `).join('');
-
-  const win = openReportWindow('Sorich Monthly Statement');
-  if (!win) return;
-
-  for (let i = 0; i < copies; i++) {
-    const copyName = ['Customer', 'Driver', 'Security', 'Manager'][i] || 'Copy';
-
-    win.document.write(`
-      <div class="brand">
-        <h1>SORICH CLASSY SERVICES</h1>
-        <p>PLOT 1 UGBSIS OFF UGBOGO, UDU ROAD, DELTA STATE</p>
-        <p>08164084402 • 07012623006 • 08067338211</p>
-      </div>
-
-      <h2 class="report-title">MONTHLY BUSINESS STATEMENT</h2>
-      <div class="period">
-        ${year}-${monthStr} &nbsp; | &nbsp;
-        ISSUER: ${escapeReportText(manager)} &nbsp; | &nbsp;
-        ${copyName.toUpperCase()} COPY
-      </div>
-
-      <div class="cards">
-        <div class="card"><span class="label">Total Sales</span><span class="value">${moneyN(totalSales)}</span></div>
-        <div class="card"><span class="label">Total Expenses</span><span class="value">${moneyN(totalExpenses)}</span></div>
-        <div class="card"><span class="label">Net Profit</span><span class="value">${moneyN(monthlyNet)}</span></div>
-        <div class="card"><span class="label">Quantity Sold</span><span class="value">${totalQty.toLocaleString()}</span></div>
-      </div>
-
-      <div class="section">
-        <h2>MONTHLY SALES SUMMARY</h2>
-        <table>
-          <tr>
-            <th>Date</th><th>Total Sales</th><th>Total Expenses</th>
-            <th>Net</th><th>Total Qty</th><th>Avg Unit Price</th>
-          </tr>
-    `);
-
-    monthRecords.forEach(d => {
-      const dailyQty = (d.sales || []).reduce((sum, s) => sum + Number(s.qty || 0), 0);
-      const dailySales = Number(d.totalSales) || 0;
-      const dailyExpenses = Number(d.totalExpenses) || 0;
-      const dailyNet = dailySales - dailyExpenses;
-
-      win.document.write(`
-        <tr>
-          <td>${escapeReportText(d.date)}</td>
-          <td>${moneyN(dailySales)}</td>
-          <td>${moneyN(dailyExpenses)}</td>
-          <td>${moneyN(dailyNet)}</td>
-          <td>${dailyQty.toLocaleString()}</td>
-          <td>${moneyN(dailyQty ? dailySales / dailyQty : 0)}</td>
-        </tr>
-      `);
-    });
-
-    win.document.write(`
-          <tr class="total-row">
-            <td>TOTAL</td>
-            <td>${moneyN(totalSales)}</td>
-            <td>${moneyN(totalExpenses)}</td>
-            <td>${moneyN(monthlyNet)}</td>
-            <td>${totalQty.toLocaleString()}</td>
-            <td>${moneyN(monthlyAvgUnitPrice)}</td>
-          </tr>
-        </table>
-      </div>
-
-      <div class="section">
-        <h2>BAGGER / PACKING BAG EXPENSE SUMMARY</h2>
-        <div class="note">
-          This section comes from <strong>Expenses</strong> recorded in the Daily Records.
-          It is the money spent on baggers/packing bags — it is NOT the number of water bags sold.
-        </div>
-        <table>
-          <tr><th>Date</th><th>Expense Type</th><th>Description</th><th>Paid To</th><th>Amount Paid</th></tr>
-          ${baggerRows || '<tr><td colspan="5">No bagger / packing bag expenses recorded for this month.</td></tr>'}
-          <tr class="total-row">
-            <td colspan="4">TOTAL BAGGER / PACKING BAG SPENDING</td>
-            <td>${moneyN(bagger.total)}</td>
-          </tr>
-        </table>
-      </div>
-
-      <div class="section">
-        <h2>TOP BUYING CUSTOMERS — MONTH</h2>
-        <table>
-          <tr><th>Rank</th><th>Customer</th><th>Quantity</th><th>Sales Value</th></tr>
-          ${topCustomers.length
-            ? topCustomers.map((c, index) => `
-                <tr>
-                  <td>${index + 1}</td>
-                  <td>${escapeReportText(c.customer)}</td>
-                  <td>${c.qty.toLocaleString()}</td>
-                  <td>${moneyN(c.sales)}</td>
-                </tr>
-              `).join('')
-            : '<tr><td colspan="4">No customer sales found.</td></tr>'
-          }
-        </table>
-      </div>
-
-      <div class="section">
-        <h2>DEBTORS SUMMARY</h2>
-        <table>
-          <tr><th>Customer</th><th>Total Credit/Owed</th><th>Paid</th><th>Current Balance</th><th>Status</th></tr>
-          ${debtorRows || '<tr><td colspan="5">No current debtors.</td></tr>'}
-        </table>
-      </div>
-
-      <div class="profit-box">
-        <div class="profit-line"><span>Total Sales</span><strong>${moneyN(totalSales)}</strong></div>
-        <div class="profit-line"><span>Total Expenses</span><strong>${moneyN(totalExpenses)}</strong></div>
-        <div class="profit-line"><span>Bagger / Packing Bag Spending (already included in expenses)</span><strong>${moneyN(bagger.total)}</strong></div>
-        <div class="real-profit"><span>MONTHLY NET PROFIT</span> — ${moneyN(monthlyNet)}</div>
-      </div>
-
-      <div class="footer">${escapeReportText(footer)}</div>
-      ${i < copies - 1 ? '<div style="page-break-after:always"></div>' : ''}
-    `);
-  }
-
-  closeAndPrintReport(win);
+ win.document.write(`<h2>OPERATOR PAYMENTS</h2><table><tr><th>Date</th><th>Type</th><th>Description</th><th>Paid To</th><th>Amount</th></tr>`);
+ data.operatorRows.forEach(e=>win.document.write(`<tr><td>${esc(e.date)}</td><td>${esc(e.type)}</td><td>${esc(e.desc)}</td><td>${esc(e.paidTo)}</td><td>₦${money(e.amount)}</td></tr>`));
+ win.document.write(`<tr class="total"><td colspan="4">TOTAL OPERATOR PAYMENT</td><td>₦${money(data.operatorTotal)}</td></tr></table>`);
 }
 
+function writeTopCustomers(win,data){
+ win.document.write(`<h2>TOP 5 BUYING CUSTOMERS</h2><table><tr><th>RANK</th><th>CUSTOMER</th><th>QUANTITY BOUGHT</th><th>SALES VALUE</th></tr>`);
+ data.top5.forEach((c,i)=>win.document.write(`<tr><td>${i+1}</td><td>${esc(c.name)}</td><td>${c.qty.toLocaleString()}</td><td>₦${money(c.sales)}</td></tr>`));
+ if(!data.top5.length) win.document.write(`<tr><td colspan="4">No customer sales found.</td></tr>`);
+ win.document.write(`</table>`);
+}
 
-// ====== WEEKLY STATEMENT FUNCTION ======
-function printWeeklyStatement() {
-  if (!dailyData.length) {
-    alert("No daily records available.");
-    return;
-  }
+function writeLiveDebtors(win,data){
+ const current={};
+ Object.values(data.customerDebt).forEach(d=>{
+   const live=debtData.find(x=>String(x.customer||'').toLowerCase()===d.name.toLowerCase());
+   const balance=live ? Number(live.owing)||0 : d.balance;
+   if(balance>0) current[d.name.toLowerCase()]={name:d.name,balance,owed:live?Number(live.totalPaid||0)+balance:d.owed,paid:live?Number(live.totalPaid||0):d.paid};
+ });
+ const rows=Object.values(current);
+ const total=rows.reduce((a,d)=>a+d.balance,0);
+ win.document.write(`<h2>LIVE DEBTORS FOR THIS PERIOD</h2><table><tr><th>CUSTOMER</th><th>TOTAL CREDIT / OWED</th><th>TOTAL PAID</th><th>CURRENT BALANCE</th><th>STATUS</th></tr>`);
+ rows.forEach(d=>win.document.write(`<tr><td>${esc(d.name)}</td><td>₦${money(d.owed)}</td><td>₦${money(d.paid)}</td><td>₦${money(d.balance)}</td><td>OWING</td></tr>`));
+ win.document.write(`<tr class="total"><td colspan="3">TOTAL LIVE DEBT</td><td>₦${money(total)}</td><td>OWING</td></tr></table>`);
+}
 
-  const start = prompt(
-    "Enter START date (YYYY-MM-DD):",
-    new Date().toISOString().split('T')[0]
-  );
-  if (!start) return;
+function showMaterialPrintDialog(callback){
+ const old=document.getElementById('materialPrintDialog'); if(old) old.remove();
+ const overlay=document.createElement('div'); overlay.id='materialPrintDialog';
+ overlay.style.cssText='position:fixed;inset:0;background:rgba(0,45,90,.55);z-index:999999;display:flex;align-items:center;justify-content:center;font-family:Arial,sans-serif;';
+ overlay.innerHTML=`<div style="background:#fff;border:4px solid #0066cc;border-radius:16px;width:min(470px,92vw);padding:24px;text-align:center;box-shadow:0 15px 50px rgba(0,0,0,.3);font-weight:700">
+   <h2 style="color:#0066cc;margin-top:0">WEEKLY PROFIT ADJUSTMENT</h2>
+   <p style="font-size:17px">DO YOU WANT TO ADD MATERIAL / PACKING BAG COST TO NET PROFIT?</p>
+   <div id="matAmountBox" style="display:none;margin:15px 0"><label style="display:block;margin-bottom:7px">TOTAL MATERIAL / PACKING BAG PAYMENT</label><input id="matPrintAmount" type="number" min="0" step="0.01" style="width:90%;padding:12px;font-size:18px;border:2px solid #0066cc;border-radius:8px" placeholder="Enter amount"></div>
+   <div style="display:flex;gap:12px;justify-content:center;margin-top:18px"><button id="matYes" style="background:#0066cc;color:#fff;border:0;border-radius:8px;padding:12px 28px;font-weight:900;cursor:pointer">YES</button><button id="matNo" style="background:#fff;color:#0066cc;border:3px solid #0066cc;border-radius:8px;padding:10px 28px;font-weight:900;cursor:pointer">NO</button></div>
+ </div>`;
+ document.body.appendChild(overlay);
+ overlay.querySelector('#matYes').onclick=()=>{
+   overlay.querySelector('#matAmountBox').style.display='block';
+   overlay.querySelector('#matYes').textContent='PRINT WITH THIS AMOUNT';
+   overlay.querySelector('#matYes').onclick=()=>{ const v=parseFloat(overlay.querySelector('#matPrintAmount').value)||0; overlay.remove(); callback(v); };
+ };
+ overlay.querySelector('#matNo').onclick=()=>{overlay.remove();callback(0);};
+}
 
-  const end = prompt(
-    "Enter END date (YYYY-MM-DD):",
-    new Date().toISOString().split('T')[0]
-  );
-  if (!end) return;
+function openStatementPrint(win){
+ win.document.close();win.focus();setTimeout(()=>{win.print();},250);
+}
 
-  const weekRecords = dailyData
-    .filter(d => String(d.date) >= start && String(d.date) <= end)
-    .sort((a, b) => String(a.date).localeCompare(String(b.date)));
+function printMonthlyStatement(){
+ if(!dailyData.length){alert('No daily records available.');return;}
+ const month=parseInt(prompt('Enter month number (1-12):',new Date().getMonth()+1));
+ const year=parseInt(prompt('Enter year (YYYY):',new Date().getFullYear()));
+ if(!month||!year)return;
+ const monthStr=String(month).padStart(2,'0');
+ const records=dailyData.filter(d=>{const [y,m]=String(d.date||'').split('-');return Number(y)===year&&m===monthStr;});
+ if(!records.length){alert('No records found for this month.');return;}
+ const data=collectPeriodData(records);
+ const manager=document.getElementById('managerName')?.value||'Manager';
+ const footer=document.getElementById('invoiceFooter')?.value||'Drink It. Love It.';
+ const copies=parseInt(document.getElementById('invoiceCopies')?.value)||4;
+ const win=window.open('','','width=1000,height=800'); if(!win){alert('Pop-up blocked! Allow pop-ups.');return;}
+ win.document.write(`<html><head><title>Sorich Monthly Statement</title><style>${statementCSS()}</style></head><body>`);
+ for(let i=0;i<copies;i++){
+   const copy=['Customer','Driver','Security','Manager'][i]||'Copy';
+   if(i) win.document.write('<div class="pagebreak"></div>');
+   writeReportHeader(win,'MONTHLY BUSINESS STATEMENT',copy,`${year}-${monthStr}`,manager);
+   writeSummaryCards(win,data);
+   win.document.write(`<h2>MONTHLY DAILY SALES</h2><table><tr><th>DATE</th><th>TOTAL SALES</th><th>TOTAL EXPENSES</th><th>NORMAL NET PROFIT</th><th>QUANTITY</th><th>AVG UNIT PRICE</th></tr>`);
+   records.forEach(d=>{const qty=(d.sales||[]).reduce((a,s)=>a+(Number(s.qty)||0),0);const sales=Number(d.totalSales)||0;const exp=(d.expenses||[]).reduce((a,e)=>a+(Number(e.amount)||0),0);win.document.write(`<tr><td>${esc(d.date)}</td><td>₦${money(sales)}</td><td>₦${money(exp)}</td><td>₦${money(sales-exp)}</td><td>${qty}</td><td>₦${money(qty?sales/qty:0)}</td></tr>`);});
+   win.document.write(`<tr class="total"><td>TOTAL</td><td>₦${money(data.totalSales)}</td><td>₦${money(data.totalExpenses)}</td><td>₦${money(data.normalNet)}</td><td>${data.totalQty}</td><td>₦${money(data.avgUnitPrice)}</td></tr></table>`);
+   writeExpenseSection(win,data);writeTopCustomers(win,data);writeLiveDebtors(win,data);
+   win.document.write(`<div class="profit"><div class="box"><div>NET PROFIT</div><div class="value">₦${money(data.normalNet)}</div></div><div class="box"><div>BAGGER / PACKING BAG SPEND</div><div class="value">₦${money(data.baggerTotal)}</div></div><div class="box"><div>OPERATOR PAYMENT</div><div class="value">₦${money(data.operatorTotal)}</div></div></div><div class="footer">${esc(footer)}</div></div>`);
+ }
+ openStatementPrint(win);
+}
 
-  if (!weekRecords.length) {
-    alert(`No records found between ${start} and ${end}`);
-    return;
-  }
-
-  /*
-    IMPORTANT:
-    This extra material/packing-bag amount is a PRINT-TIME deduction.
-    It is NOT automatically saved into Expenses and therefore cannot
-    double-count the actual expense already recorded there.
-  */
-  const addMaterial = confirm(
-    "DO YOU WANT TO ADD MATERIAL / PACKING BAG COST TO THE NET PROFIT?\n\n" +
-    "YES = enter an additional material/packing bag payment to subtract from the report.\n" +
-    "NO = print the normal weekly report."
-  );
-
-  let extraMaterialCost = 0;
-
-  if (addMaterial) {
-    const entered = prompt(
-      "ENTER TOTAL MATERIAL / PACKING BAG PAYMENT TO SUBTRACT FROM NET PROFIT:\n\n" +
-      "Only enter an amount that is NOT already included in the Expenses records.",
-      "0"
-    );
-
-    if (entered === null) {
-      return;
-    }
-
-    extraMaterialCost = parseFloat(String(entered).replace(/,/g, '')) || 0;
-
-    if (extraMaterialCost < 0) {
-      alert("Invalid material amount.");
-      return;
-    }
-  }
-
-  const copies = parseInt(document.getElementById('invoiceCopies')?.value, 10) || 4;
-  const manager = document.getElementById('managerName')?.value || 'Manager';
-  const footer = document.getElementById('invoiceFooter')?.value || 'Drink It. Love It.';
-
-  let totalSales = 0;
-  let totalExpenses = 0;
-  let totalQty = 0;
-
-  const customerSales = {};
-
-  weekRecords.forEach(d => {
-    totalSales += Number(d.totalSales) || 0;
-    totalExpenses += Number(d.totalExpenses) || 0;
-
-    (d.sales || []).forEach(s => {
-      totalQty += Number(s.qty) || 0;
-
-      const name = String(s.customer || 'Unknown Customer').trim() || 'Unknown Customer';
-      const key = name.toLowerCase();
-
-      if (!customerSales[key]) {
-        customerSales[key] = {
-          customer: name,
-          qty: 0,
-          sales: 0
-        };
-      }
-
-      customerSales[key].qty += Number(s.qty) || 0;
-      customerSales[key].sales += Number(s.total) || 0;
-    });
-  });
-
-  const normalNetProfit = totalSales - totalExpenses;
-  const realEatingProfit = normalNetProfit - extraMaterialCost;
-  const avgUnitPrice = totalQty ? totalSales / totalQty : 0;
-
-  const bagger = collectBaggerPackingExpenses(weekRecords);
-
-  const topCustomers = Object.values(customerSales)
-    .sort((a, b) => b.sales - a.sales)
-    .slice(0, 5);
-
-  const weekCustomers = Object.values(customerSales)
-    .map(c => c.customer.toLowerCase());
-
-  const weekDebtors = {};
-  let totalWeekDebt = 0;
-
-  weekCustomers.forEach(name => {
-    const debt = debtData.find(
-      d => String(d.customer || '').toLowerCase() === name
-    );
-
-    if (debt && Number(debt.owing) > 0) {
-      weekDebtors[name] = {
-        customer: debt.customer,
-        totalOwed: Number(debt.totalPaid || 0) + Number(debt.owing || 0),
-        totalPaid: Number(debt.totalPaid || 0),
-        balance: Number(debt.owing || 0)
-      };
-
-      totalWeekDebt += Number(debt.owing || 0);
-    }
-  });
-
-  const baggerRows = bagger.rows.map(e => `
-    <tr>
-      <td>${escapeReportText(e.date)}</td>
-      <td>${escapeReportText(e.type)}</td>
-      <td>${escapeReportText(e.desc)}</td>
-      <td>${escapeReportText(e.paidTo)}</td>
-      <td>${moneyN(e.amount)}</td>
-    </tr>
-  `).join('');
-
-  const win = openReportWindow('Sorich Weekly Statement');
-  if (!win) return;
-
-  for (let i = 0; i < copies; i++) {
-    const copyName = ['Customer', 'Driver', 'Security', 'Manager'][i] || 'Copy';
-
-    win.document.write(`
-      <div class="brand">
-        <h1>SORICH CLASSY SERVICES</h1>
-        <p>PLOT 1 UGBSIS OFF UGBOGO, UDU ROAD, DELTA STATE</p>
-        <p>08164084402 • 07012623006 • 08067338211</p>
-      </div>
-
-      <h2 class="report-title">WEEKLY SALES & PROFIT STATEMENT</h2>
-      <div class="period">
-        ${escapeReportText(start)} TO ${escapeReportText(end)}
-        &nbsp; | &nbsp; MONDAY–SATURDAY REPORT
-        &nbsp; | &nbsp; ${copyName.toUpperCase()} COPY
-      </div>
-
-      <div class="cards">
-        <div class="card"><span class="label">Total Sales</span><span class="value">${moneyN(totalSales)}</span></div>
-        <div class="card"><span class="label">Total Expenses</span><span class="value">${moneyN(totalExpenses)}</span></div>
-        <div class="card"><span class="label">Normal Net Profit</span><span class="value">${moneyN(normalNetProfit)}</span></div>
-        <div class="card"><span class="label">Quantity Sold</span><span class="value">${totalQty.toLocaleString()}</span></div>
-      </div>
-
-      <div class="section">
-        <h2>WEEKLY SALES SUMMARY</h2>
-        <table>
-          <tr>
-            <th>Date</th><th>Total Sales</th><th>Total Expenses</th>
-            <th>Net Balance</th><th>Total Qty</th><th>Avg Unit Price</th>
-          </tr>
-    `);
-
-    weekRecords.forEach(d => {
-      const dailyQty = (d.sales || []).reduce((sum, s) => sum + Number(s.qty || 0), 0);
-      const dailySales = Number(d.totalSales) || 0;
-      const dailyExpenses = Number(d.totalExpenses) || 0;
-      const dailyNet = dailySales - dailyExpenses;
-
-      win.document.write(`
-        <tr>
-          <td>${escapeReportText(d.date)}</td>
-          <td>${moneyN(dailySales)}</td>
-          <td>${moneyN(dailyExpenses)}</td>
-          <td>${moneyN(dailyNet)}</td>
-          <td>${dailyQty.toLocaleString()}</td>
-          <td>${moneyN(dailyQty ? dailySales / dailyQty : 0)}</td>
-        </tr>
-      `);
-    });
-
-    win.document.write(`
-          <tr class="total-row">
-            <td>TOTAL</td>
-            <td>${moneyN(totalSales)}</td>
-            <td>${moneyN(totalExpenses)}</td>
-            <td>${moneyN(normalNetProfit)}</td>
-            <td>${totalQty.toLocaleString()}</td>
-            <td>${moneyN(avgUnitPrice)}</td>
-          </tr>
-        </table>
-      </div>
-
-      <div class="section">
-        <h2>BAGGER / PACKING BAG EXPENSE SUMMARY</h2>
-        <div class="note">
-          This amount comes from <strong>Expenses</strong> recorded in the Daily Records.
-          It tells you how much money was spent on baggers/packing bags. It does NOT count bags of water sold.
-        </div>
-        <table>
-          <tr><th>Date</th><th>Expense Type</th><th>Description</th><th>Paid To</th><th>Amount Paid</th></tr>
-          ${baggerRows || '<tr><td colspan="5">No bagger / packing bag expenses recorded for this week.</td></tr>'}
-          <tr class="total-row">
-            <td colspan="4">TOTAL BAGGER / PACKING BAG SPENDING</td>
-            <td>${moneyN(bagger.total)}</td>
-          </tr>
-        </table>
-      </div>
-
-      <div class="section">
-        <h2>TOP 5 BUYING CUSTOMERS — THIS WEEK</h2>
-        <table>
-          <tr><th>Rank</th><th>Customer</th><th>Quantity Bought</th><th>Total Sales Value</th></tr>
-          ${topCustomers.length
-            ? topCustomers.map((c, index) => `
-                <tr>
-                  <td>${index + 1}</td>
-                  <td>${escapeReportText(c.customer)}</td>
-                  <td>${c.qty.toLocaleString()}</td>
-                  <td>${moneyN(c.sales)}</td>
-                </tr>
-              `).join('')
-            : '<tr><td colspan="4">No customer sales found.</td></tr>'
-          }
-        </table>
-      </div>
-
-      <div class="section">
-        <h2>LIVE DEBTORS</h2>
-        <table>
-          <tr><th>Customer</th><th>Total Owed</th><th>Total Paid</th><th>Current Balance</th></tr>
-          ${Object.values(weekDebtors).length
-            ? Object.values(weekDebtors).map(d => `
-                <tr>
-                  <td>${escapeReportText(d.customer)}</td>
-                  <td>${moneyN(d.totalOwed)}</td>
-                  <td>${moneyN(d.totalPaid)}</td>
-                  <td>${moneyN(d.balance)}</td>
-                </tr>
-              `).join('')
-            : '<tr><td colspan="4">No current debtors from this week.</td></tr>'
-          }
-          <tr class="total-row">
-            <td colspan="3">TOTAL CURRENT OWING</td>
-            <td>${moneyN(totalWeekDebt)}</td>
-          </tr>
-        </table>
-      </div>
-
-      <div class="section">
-        <h2>WEEKLY PROFIT CHECK</h2>
-        <div class="profit-box">
-          <div class="profit-line">
-            <span>Total Sales</span>
-            <strong>${moneyN(totalSales)}</strong>
-          </div>
-          <div class="profit-line">
-            <span>Normal Expenses</span>
-            <strong>${moneyN(totalExpenses)}</strong>
-          </div>
-          <div class="profit-line">
-            <span>Net Profit Before Additional Material</span>
-            <strong>${moneyN(normalNetProfit)}</strong>
-          </div>
-          <div class="profit-line">
-            <span>Additional Material / Packing Bag Payment</span>
-            <strong>${moneyN(extraMaterialCost)}</strong>
-          </div>
-          <div class="real-profit">
-            REAL EATING PROFIT — ${moneyN(realEatingProfit)}
-          </div>
-        </div>
-
-        ${extraMaterialCost > 0
-          ? `<div class="note">
-               The additional ${moneyN(extraMaterialCost)} was entered at print time and
-               subtracted from the normal net profit. It was NOT added to stored Expenses.
-               If this payment is already inside Expenses, do not enter it again.
-             </div>`
-          : `<div class="note">
-               No additional material / packing bag payment was added at print time.
-               The normal net profit is therefore the report's real-eating-profit figure for this print.
-             </div>`
-        }
-      </div>
-
-      <div class="footer">
-        ISSUER: ${escapeReportText(manager)}<br>
-        ${escapeReportText(footer)}
-      </div>
-
-      ${i < copies - 1 ? '<div style="page-break-after:always"></div>' : ''}
-    `);
-  }
-
-  closeAndPrintReport(win);
+function printWeeklyStatement(){
+ if(!dailyData.length){alert('No daily records available.');return;}
+ const start=prompt('Enter START date (YYYY-MM-DD):',new Date().toISOString().split('T')[0]);if(!start)return;
+ const end=prompt('Enter END date (YYYY-MM-DD):',new Date().toISOString().split('T')[0]);if(!end)return;
+ if(end<start){alert('END date cannot be before START date.');return;}
+ const records=dailyData.filter(d=>String(d.date||'')>=start&&String(d.date||'')<=end);
+ if(!records.length){alert(`No records found between ${start} and ${end}`);return;}
+ const data=collectPeriodData(records);
+ showMaterialPrintDialog(materialCost=>{
+   const manager=document.getElementById('managerName')?.value||'Manager';
+   const footer=document.getElementById('invoiceFooter')?.value||'Drink It. Love It.';
+   const copies=parseInt(document.getElementById('invoiceCopies')?.value)||4;
+   const realProfit=data.normalNet-materialCost;
+   const win=window.open('','','width=1000,height=800');if(!win){alert('Pop-up blocked! Allow pop-ups.');return;}
+   win.document.write(`<html><head><title>Sorich Weekly Statement</title><style>${statementCSS()}</style></head><body>`);
+   for(let i=0;i<copies;i++){
+     const copy=['Customer','Driver','Security','Manager'][i]||'Copy';
+     if(i)win.document.write('<div class="pagebreak"></div>');
+     writeReportHeader(win,'WEEKLY BUSINESS STATEMENT',copy,`${start} TO ${end}`,manager);
+     writeSummaryCards(win,data);
+     win.document.write(`<div class="profit"><div class="box"><div>NORMAL NET PROFIT</div><div class="value">₦${money(data.normalNet)}</div></div><div class="box"><div>MATERIAL / PACKING BAG ADDED</div><div class="value">₦${money(materialCost)}</div></div><div class="box real"><div>REAL EATING PROFIT</div><div class="value">₦${money(realProfit)}</div></div></div>`);
+     if(materialCost>0)win.document.write(`<div class="note">ADDITIONAL MATERIAL / PACKING BAG COST INCLUDED IN THIS PRINT: ₦${money(materialCost)}. This is a print-time adjustment and was not added again to Expenses.</div>`);
+     win.document.write(`<h2>WEEKLY DAILY SALES</h2><table><tr><th>DATE</th><th>TOTAL SALES</th><th>TOTAL EXPENSES</th><th>NORMAL NET PROFIT</th><th>TOTAL QUANTITY</th><th>AVERAGE UNIT PRICE</th></tr>`);
+     records.forEach(d=>{const qty=(d.sales||[]).reduce((a,s)=>a+(Number(s.qty)||0),0);const sales=Number(d.totalSales)||0;const exp=(d.expenses||[]).reduce((a,e)=>a+(Number(e.amount)||0),0);win.document.write(`<tr><td>${esc(d.date)}</td><td>₦${money(sales)}</td><td>₦${money(exp)}</td><td>₦${money(sales-exp)}</td><td>${qty}</td><td>₦${money(qty?sales/qty:0)}</td></tr>`);});
+     win.document.write(`<tr class="total"><td>TOTAL</td><td>₦${money(data.totalSales)}</td><td>₦${money(data.totalExpenses)}</td><td>₦${money(data.normalNet)}</td><td>${data.totalQty}</td><td>₦${money(data.avgUnitPrice)}</td></tr></table>`);
+     writeExpenseSection(win,data);writeTopCustomers(win,data);writeLiveDebtors(win,data);
+     win.document.write(`<h2>WEEKLY PROFIT</h2><table><tr><th>NORMAL NET PROFIT</th><th>MATERIAL / PACKING BAG ADDED</th><th>REAL EATING PROFIT</th></tr><tr class="total"><td>₦${money(data.normalNet)}</td><td>₦${money(materialCost)}</td><td>₦${money(realProfit)}</td></tr></table><div class="footer">${esc(footer)}</div></div>`);
+   }
+   openStatementPrint(win);
+ });
 }
 
 
 // ==========================================
 // PERMANENT CUSTOMER SUGGESTIONS
-// Customers are saved even after End Of Day
-// ==========================================
-
 // Customers are saved even after End Of Day
 // ==========================================
 
