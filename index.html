@@ -2353,7 +2353,47 @@ const dailyAvgUnit = dailyQty
 
 
 
-function printWeeklyStatement() {
+async function showWeeklyProfitDeductionDialog() {
+  return new Promise(resolve => {
+    const existing = document.getElementById('weeklyProfitDeductionModal');
+    if (existing) existing.remove();
+
+    const modal = document.createElement('div');
+    modal.id = 'weeklyProfitDeductionModal';
+    modal.style.cssText = `
+      position:fixed; inset:0; z-index:999999;
+      display:flex; align-items:center; justify-content:center;
+      background:rgba(0,0,0,.55); padding:20px;
+      font-family:Arial,sans-serif;
+    `;
+
+    modal.innerHTML = `
+      <div style="background:#fff; width:min(520px,95vw); border-radius:16px; padding:28px; box-shadow:0 20px 60px rgba(0,0,0,.3); text-align:center;">
+        <div style="font-size:42px; margin-bottom:8px;">💰</div>
+        <h2 style="margin:0 0 12px; color:#123;">Material / Packing Bag Deduction</h2>
+        <p style="font-size:17px; line-height:1.5; margin:0 0 24px;">
+          Do you want to deduct a <strong>Material / Packing Bag</strong> amount from the Net Profit for this Weekly Statement?
+        </p>
+        <div style="display:flex; gap:14px; justify-content:center;">
+          <button type="button" id="weeklyDeductYes" style="min-width:140px; padding:14px 22px; border:0; border-radius:10px; background:#16a34a; color:#fff; font-size:17px; font-weight:bold; cursor:pointer;">YES</button>
+          <button type="button" id="weeklyDeductNo" style="min-width:140px; padding:14px 22px; border:0; border-radius:10px; background:#dc2626; color:#fff; font-size:17px; font-weight:bold; cursor:pointer;">NO</button>
+        </div>
+      </div>
+    `;
+
+    document.body.appendChild(modal);
+
+    const finish = value => {
+      modal.remove();
+      resolve(value);
+    };
+
+    modal.querySelector('#weeklyDeductYes').addEventListener('click', () => finish(true));
+    modal.querySelector('#weeklyDeductNo').addEventListener('click', () => finish(false));
+  });
+}
+
+async function printWeeklyStatement() {
   if (!dailyData.length) {
     alert("No daily records available.");
     return;
@@ -2404,12 +2444,27 @@ function printWeeklyStatement() {
     });
   });
 
-  const deductMaterialPacking = confirm(
-    `Do you want to add Material / Packing Bag to be deducted from Net Profit?\n\n` +
-    `Material + Packing Bag total: ₦${materialPackingDeduction.toLocaleString(undefined, { minimumFractionDigits: 2 })}\n\n` +
-    `YES = deduct it from Net Profit for Total Sharing Profit\n` +
-    `NO = show the normal Net Profit`
-  );
+  // Ask the user with a real YES / NO popup. The amount is entered only after YES.
+  const deductMaterialPacking = await showWeeklyProfitDeductionDialog();
+  let sharingDeductionAmount = 0;
+
+  if (deductMaterialPacking) {
+    const enteredAmount = prompt(
+      `Enter the Material / Packing Bag amount to deduct from Net Profit for this week.\n\n` +
+      `Suggested reference from recorded expenses: ₦${materialPackingDeduction.toLocaleString(undefined, { minimumFractionDigits: 2 })}`,
+      materialPackingDeduction > 0 ? materialPackingDeduction.toFixed(2) : ''
+    );
+
+    if (enteredAmount === null) {
+      return;
+    }
+
+    sharingDeductionAmount = Number(String(enteredAmount).replace(/[^0-9.-]/g, ''));
+    if (!Number.isFinite(sharingDeductionAmount) || sharingDeductionAmount < 0) {
+      alert('Please enter a valid positive amount.');
+      return;
+    }
+  }
 
   const copies = parseInt(document.getElementById('invoiceCopies').value) || 4;
   const manager = document.getElementById('managerName').value || 'Manager';
@@ -2466,7 +2521,7 @@ function printWeeklyStatement() {
 
   const normalNetProfit = totalNet;
   const totalSharingProfit = deductMaterialPacking
-    ? normalNetProfit - materialPackingDeduction
+    ? normalNetProfit - sharingDeductionAmount
     : normalNetProfit;
 
   const sharingProfitLabel = deductMaterialPacking
@@ -2606,7 +2661,7 @@ function printWeeklyStatement() {
 
       ${deductMaterialPacking ? `
       <p><strong>Material / Packing Bag Deduction:</strong>
-      -₦${materialPackingDeduction.toLocaleString(undefined,{minimumFractionDigits:2})}</p>
+      -₦${sharingDeductionAmount.toLocaleString(undefined,{minimumFractionDigits:2})}</p>
 
       <p style="font-size:18px; font-weight:bold;">
         <strong>Total Sharing Profit:</strong>
