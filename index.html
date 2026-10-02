@@ -786,11 +786,12 @@ function addExpense() {
     return;
   }
 
-  // Automatically classify from what was typed, while allowing the
-  // Description dropdown to be manually corrected before saving.
+  // The selected Description is the saved category. If nothing is selected,
+  // detect the category automatically from Type / Details / Paid To.
+  const detected = normalizeExpenseCategory(`${type} ${paidTo}`);
   const category = desc && EXPENSE_CATEGORIES.includes(desc)
     ? desc
-    : (normalizeExpenseCategory(type) || 'Other');
+    : (detected || 'Other');
 
   const date = new Date().toLocaleString();
 
@@ -798,6 +799,7 @@ function addExpense() {
     type: type || category,
     desc: category,
     category,
+    categoryManual: !!(desc && EXPENSE_CATEGORIES.includes(desc)),
     amount,
     paidTo,
     date
@@ -889,6 +891,7 @@ function editExpense(index) {
   e.type = type || EXPENSE_CATEGORIES[categoryIndex];
   e.desc = EXPENSE_CATEGORIES[categoryIndex];
   e.category = EXPENSE_CATEGORIES[categoryIndex];
+  e.categoryManual = true;
   e.amount = amount;
   e.paidTo = paidTo || 'Unknown';
 
@@ -911,7 +914,8 @@ function addExpenseToDailyRecord(dailyIndex) {
   const paidTo = prompt('Paid To (optional):', '');
   if (paidTo === null) return;
 
-  d.expenses.push({ type: type.trim(), desc: desc.trim(), amount, paidTo: paidTo.trim() });
+  const dailyCategory = normalizeExpenseCategory(`${type.trim()} ${desc.trim()} ${paidTo.trim()}`) || 'Other';
+  d.expenses.push({ type: type.trim(), desc: dailyCategory, category: dailyCategory, amount, paidTo: paidTo.trim() });
   recalcDailyRecord(d);
   localStorage.setItem('dailyData', JSON.stringify(dailyData));
   renderDailyRecords();
@@ -933,7 +937,8 @@ function editDailyExpense(dailyIndex, expenseIndex) {
   if (paidTo === null) return;
 
   e.type = type || 'General';
-  e.desc = desc || 'No description';
+  e.desc = normalizeExpenseCategory(`${type} ${desc} ${e.paidTo || ''}`) || desc || 'Other';
+  e.category = e.desc;
   e.amount = amount;
   e.paidTo = paidTo || 'Unknown';
   // IMPORTANT: the expense remains under the daily record's original date.
@@ -984,8 +989,9 @@ function clearDailyExpenses() {
       })),
       expenses: expenseData.map(e => ({
         type: e.type,
-        desc: e.desc,
+        desc: getExpenseCategory(e),
         category: getExpenseCategory(e),
+        categoryManual: e.categoryManual === true,
         amount: Number(e.amount),
         paidTo: e.paidTo
       }))
@@ -1303,7 +1309,7 @@ function endOfDay() {
     owing:Number(s.owing||0),
     debtHistoryId:s.debtHistoryId || null
   }));
-  expenseData.forEach(e => d.expenses.push({type:e.type, desc:e.desc, amount:Number(e.amount||0), paidTo:e.paidTo}));
+  expenseData.forEach(e => d.expenses.push({type:e.type, desc:getExpenseCategory(e), category:getExpenseCategory(e), categoryManual:e.categoryManual === true, amount:Number(e.amount||0), paidTo:e.paidTo}));
   recalcDailyRecord(d);
 
   localStorage.setItem('dailyData', JSON.stringify(dailyData));
@@ -1860,26 +1866,67 @@ function normalizeExpenseCategory(value) {
   const raw = String(value || '').toLowerCase().trim();
   if (!raw) return '';
 
-  if (/\\b(fuel|diesel|petrol|gas|generator fuel)\\b/.test(raw)) return 'Fuel';
-  if (/\\b(supply|supplies|supply money|material|materials|raw material|packaging material)\\b/.test(raw)) return 'Supply Money';
-  if (/\\b(repair|repairs|maintenance|maintainance|fix|fixed)\\b/.test(raw)) return 'Maintenance / Repair';
-  if (/\\b(bagging|bagger|bagging fee|operator|operators|machine operator|production operator)\\b/.test(raw)) return 'Bagging / Operator';
-  if (/\\b(borrow|borrowed|borrowing|loan|loans)\\b/.test(raw)) return 'Borrow';
-  if (/\\b(ticket|tickets|transport ticket|fare ticket)\\b/.test(raw)) return 'Ticket';
-  if (/\\b(feeding|food|feeding money|late night|night supply|late-night supply)\\b/.test(raw)) return 'Feeding Money / Late Night Supply';
+  if (/\b(fuel|diesel|petrol|gas|generator fuel)\b/.test(raw)) return 'Fuel';
+  if (/\b(supply|supplies|supply money|material|materials|raw material|packaging material)\b/.test(raw)) return 'Supply Money';
+  if (/\b(repair|repairs|maintenance|maintainance|fix|fixed)\b/.test(raw)) return 'Maintenance / Repair';
+  if (/\b(bagging|bagger|bagging fee|operator|operators|machine operator|production operator)\b/.test(raw)) return 'Bagging / Operator';
+  if (/\b(borrow|borrowed|borrowing|loan|loans)\b/.test(raw)) return 'Borrow';
+  if (/\b(ticket|tickets|transport ticket|fare ticket)\b/.test(raw)) return 'Ticket';
+  if (/\b(feeding|food|feeding money|late night|night supply|late-night supply)\b/.test(raw)) return 'Feeding Money / Late Night Supply';
 
   return '';
 }
 
 function getExpenseCategory(expense) {
   const explicit = String(expense?.category || '').trim();
-  if (EXPENSE_CATEGORIES.includes(explicit)) return explicit;
-
-  const type = String(expense?.type || '').trim();
   const desc = String(expense?.desc || '').trim();
+  const type = String(expense?.type || '').trim();
   const paidTo = String(expense?.paidTo || '').trim();
 
-  return normalizeExpenseCategory(`${type} ${desc} ${paidTo}`) || 'Other';
+  // A category explicitly chosen by the user is authoritative, including Other.
+  if (expense?.categoryManual === true && EXPENSE_CATEGORIES.includes(explicit)) {
+    return explicit;
+  }
+
+  // Any real fixed category saved in the record is authoritative.
+  if (EXPENSE_CATEGORIES.includes(explicit) && explicit !== 'Other') return explicit;
+
+  // Older records may have the category stored in Description only.
+  const exactDesc = EXPENSE_CATEGORIES.find(c => c.toLowerCase() === desc.toLowerCase());
+  if (exactDesc && exactDesc !== 'Other') return exactDesc;
+
+  // IMPORTANT: if an older record was saved as "Other" but the Type/Details
+  // clearly says Fuel, Repair, Ticket, etc., re-classify it for reports.
+  const detected = normalizeExpenseCategory(`${type} ${desc} ${paidTo}`);
+  return detected || 'Other';
+}
+
+
+function migrateExpenseCategories() {
+  let expenseChanged = false;
+  (expenseData || []).forEach(e => {
+    const category = getExpenseCategory(e);
+    if (e.category !== category || e.desc !== category) {
+      e.category = category;
+      e.desc = category;
+      expenseChanged = true;
+    }
+  });
+
+  let dailyChanged = false;
+  (dailyData || []).forEach(d => {
+    (d.expenses || []).forEach(e => {
+      const category = getExpenseCategory(e);
+      if (e.category !== category || e.desc !== category) {
+        e.category = category;
+        e.desc = category;
+        dailyChanged = true;
+      }
+    });
+  });
+
+  if (expenseChanged) localStorage.setItem('expenseData', JSON.stringify(expenseData));
+  if (dailyChanged) localStorage.setItem('dailyData', JSON.stringify(dailyData));
 }
 
 function autoSetExpenseCategory() {
@@ -1890,12 +1937,15 @@ function autoSetExpenseCategory() {
   const detected = normalizeExpenseCategory(typeEl.value);
   if (detected) {
     descEl.value = detected;
+    descEl.dataset.autoDetected = 'true';
+  } else {
+    descEl.dataset.autoDetected = 'false';
   }
 }
 
 function manualExpenseCategoryChange() {
-  // The Description dropdown is the manual override.
-  // Whatever the user selects here is kept as the recorded category.
+  const descEl = document.getElementById('expenseDesc');
+  if (descEl) descEl.dataset.autoDetected = 'false';
 }
 
 function setExpenseCategoryFromValue(value, descElement) {
@@ -1903,6 +1953,8 @@ function setExpenseCategoryFromValue(value, descElement) {
   if (detected && descElement) descElement.value = detected;
   return detected || (descElement?.value || 'Other');
 }
+
+migrateExpenseCategories();
 
 function buildExpenseBreakdown(records) {
   const totals = {};
@@ -1929,9 +1981,10 @@ function buildExpenseBreakdown(records) {
 }
 
 function getExpenseSummaryComment(breakdown) {
-  if (!breakdown.length) return 'No expense was recorded for this period.';
-  const highest = breakdown[0];
-  const total = breakdown.reduce((sum, item) => sum + item.amount, 0);
+  const active = (breakdown || []).filter(item => Number(item.amount) > 0);
+  if (!active.length) return 'No expense was recorded for this period.';
+  const highest = active.reduce((best, item) => item.amount > best.amount ? item : best, active[0]);
+  const total = active.reduce((sum, item) => sum + Number(item.amount || 0), 0);
   return `Highest expense: ${escapeReportHtml(highest.category)} — ₦${highest.amount.toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2})} (${highest.percent.toFixed(1)}% of total expenses). Total expenses: ₦${total.toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2})}.`;
 }
 
